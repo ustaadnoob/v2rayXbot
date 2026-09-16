@@ -1,12 +1,11 @@
 import os
+import re
 import requests
-from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Tere 2 channels
 CHANNELS = [
     {"username": "@bekarChannel", "link": "https://t.me/bekarChannel", "name": "Bekar Channel"},
     {"username": "@raretriccks", "link": "https://t.me/raretriccks", "name": "Rare Tricks"}
@@ -24,92 +23,78 @@ async def is_joined_all(context, user_id):
             continue
     return True
 
-async def get_not_joined(context, user_id):
-    not_joined = []
-    for ch in CHANNELS:
-        try:
-            m = await context.bot.get_chat_member(ch["username"], user_id)
-            if m.status not in ['member','administrator','creator']:
-                not_joined.append(ch)
-        except:
-            continue
-    return not_joined
-
 def get_configs(country):
     try:
-        url = f"https://v2nodes.com/subscriptions/{country.lower()}/"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        configs = []
-        for code in soup.find_all('code'):
-            text = code.get_text()
-            if text.startswith("vless://") or text.startswith("vmess://"):
-                configs.append(text + "#aaloo")
-            if len(configs) >= 10:
-                break
-        return configs
-    except:
+        urls = [
+            f"https://v2nodes.com/subscriptions/{country.lower()}/",
+            f"https://www.v2nodes.com/subscriptions/{country.lower()}/",
+            f"https://v2nodes.com/{country.lower()}/"
+        ]
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
+        for url in urls:
+            print(f"Trying {url}")
+            r = requests.get(url, headers=headers, timeout=20)
+            text = r.text
+            found = re.findall(r'(vless://[^\s<"\']+|vmess://[^\s<"\']+|trojan://[^\s<"\']+|ss://[^\s<"\']+)', text)
+            if found:
+                clean = []
+                for c in found[:10]:
+                    if "#aaloo" not in c:
+                        c = c + f"#{country}-aaloo"
+                    clean.append(c)
+                return clean
+        return []
+    except Exception as e:
+        print(f"Error: {e}")
         return []
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_joined_all(context, update.effective_user.id):
-        kb = []
-        for ch in CHANNELS:
-            kb.append([InlineKeyboardButton(f"📢 Join {ch['name']}", url=ch["link"])])
-        kb.append([InlineKeyboardButton("✅ Verify (Join Karke Dabao)", callback_data='verify')])
-
-        await update.message.reply_text(
-            "⚠️ Bot use karne ke liye 2 channels join karna zaroori hai!\n\n1. Dono Join karo\n2. Join karke Verify dabao",
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
+    user_id = update.effective_user.id
+    if not await is_joined_all(context, user_id):
+        buttons = [[InlineKeyboardButton(ch["name"], url=ch["link"])] for ch in CHANNELS]
+        buttons.append([InlineKeyboardButton("✅ Verify Joined", callback_data="verify")])
+        await update.message.reply_text("Bot use karne ke liye pehle channels join karo:", reply_markup=InlineKeyboardMarkup(buttons))
         return
-    
-    keyboard = []
-    for c in COUNTRIES:
-        keyboard.append([InlineKeyboardButton(c, callback_data=c)])
-    await update.message.reply_text("✅ Verified! Select country:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await show_countries(update)
 
-async def verify_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    if await is_joined_all(context, q.from_user.id):
-        keyboard = []
-        for c in COUNTRIES:
-            keyboard.append([InlineKeyboardButton(c, callback_data=c)])
-        await q.edit_message_text("✅ Dono join ho gaye! Select country:", reply_markup=InlineKeyboardMarkup(keyboard))
+async def show_countries(update):
+    buttons = [[InlineKeyboardButton(c, callback_data=f"country_{c}")] for c in COUNTRIES]
+    markup = InlineKeyboardMarkup(buttons)
+    text = "Country select karo:"
+    if update.message:
+        await update.message.reply_text(text, reply_markup=markup)
     else:
-        not_joined = await get_not_joined(context, q.from_user.id)
-        kb = []
-        for ch in CHANNELS:
-            kb.append([InlineKeyboardButton(f"📢 Join {ch['name']}", url=ch["link"])])
-        kb.append([InlineKeyboardButton("✅ Verify Again", callback_data='verify')])
-        left = ", ".join([c['name'] for c in not_joined]) if not_joined else "1 channel"
-        await q.edit_message_text(f"❌ Abhi bhi {left} join karna rehta hai!", reply_markup=InlineKeyboardMarkup(kb))
+        await update.callback_query.message.edit_text(text, reply_markup=markup)
 
-async def country_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    # Agar country wala button hai to
-    if q.data in COUNTRIES:
-        await q.answer()
-        if not await is_joined_all(context, q.from_user.id):
-            await q.edit_message_text("❌ Pehle dono channels join karo! /start dabao")
-            return
-        country = q.data
-        await q.edit_message_text(f"⏳ Fetching {country} configs...")
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "verify":
+        if await is_joined_all(context, query.from_user.id):
+            await show_countries(update)
+        else:
+            await query.answer("Abhi tak join nahi kiya!", show_alert=True)
+        return
+
+    if data.startswith("country_"):
+        country = data.split("_")[1]
+        await query.message.edit_text(f"{country} ke configs nikal raha hu...")
         configs = get_configs(country)
         if not configs:
-            await q.edit_message_text(f"❌ No configs found for {country}")
+            await query.message.edit_text(f"No configs found for {country}. Dusra country try karo.")
+            await show_countries(update)
             return
-        msg = f"✅ {country} - {len(configs)} Configs:\n\n" + "\n\n".join(configs)
-        if len(msg) > 4000:
-            msg = msg[:4000]
-        await q.edit_message_text(msg)
+        msg = f"**{country} Configs ({len(configs)}):**\n\n" + "\n\n".join([f"`{c}`" for c in configs])
+        await query.message.edit_text(msg, parse_mode="Markdown")
 
-if __name__ == "__main__":
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(verify_handler, pattern='verify'))
-    app.add_handler(CallbackQueryHandler(country_handler))
-    print("Bot Running with 2 Channel Lock...")
+    app.add_handler(CallbackQueryHandler(button_handler))
+    print("Bot started...")
     app.run_polling()
+
+if __name__ == "__main__":
+    main()
