@@ -1,17 +1,18 @@
-name: VPN Bot
-
+name: Run Telenor Bot
 on:
   workflow_dispatch:
+  push:
+    branches: [ main ]
 
 jobs:
-  bot:
+  run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: '3.10'
       - run: pip install -r requirements.txt
-      - env:
+      - run: python bot.py
+        env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-        run: python bot.py
