@@ -1,98 +1,228 @@
-import os
-import re
+#2nd
 import requests
-from bs4 import BeautifulSoup
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import json
+import time
+import re
+import html
+import unicodedata
+import queue
+import threading
+from datetime import datetime
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+import pycountry
+import phonenumbers
+from flask import Flask, Response
 
-# Secret se token lega - GitHub Actions ke liye
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# ===== CONFIG =====
+API_TOKEN = "Api token"
+BASE_URL = "http://51.77.216.195/crapi/dgroup"
 
-CHANNELS = [
-    {"username": "@bekarChannel", "link": "https://t.me/bekarChannel", "name": "Bekar Channel"},
-    {"username": "@raretriccks", "link": "https://t.me/raretriccks", "name": "Rare Tricks"}
-]
+BOT_TOKEN = "8647027040:AAH6a8mpTBylHbbB6XBbaLvZz72PpETMwwE"
+CHAT_IDS = [
+    "1087968824"
+    ]
+CHANNEL_LINK = "https://t.me/bekarChannel"
+BACKUP = "https://t.me/raretriccks"
 
-async def is_joined_all(context, user_id):
-    for ch in CHANNELS:
-        try:
-            m = await context.bot.get_chat_member(ch["username"], user_id)
-            if m.status not in ['member','administrator','creator']:
-                return False
-        except:
-            continue
-    return True
+seen_messages = set()
+message_queue = queue.Queue()
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_joined_all(context, update.effective_user.id):
-        kb = []
-        for c in CHANNELS:
-            kb.append([InlineKeyboardButton(f"📢 Join {c['name']}", url=c["link"])])
-        kb.append([InlineKeyboardButton("✅ Verify", callback_data='verify')])
-        
-        await update.message.reply_text(
-            "⚠️ Bot use karne ke liye 2 channels join karo!\n\n1. Dono join karo\n2. Verify dabao",
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-        return
-    kb = [[InlineKeyboardButton("🎯 Aaj Ke Answers", callback_data='get_quiz')]]
-    await update.message.reply_text("✅ Dono joined! Answers ke liye dabao.", reply_markup=InlineKeyboardMarkup(kb))
+# ========= TELEGRAM SENDER =========
+def send_to_telegram(msg, kb=None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    success = False
 
-async def verify_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    if await is_joined_all(context, q.from_user.id):
-        kb = [[InlineKeyboardButton("🎯 Aaj Ke Answers", callback_data='get_quiz')]]
-        await q.edit_message_text("✅ Verified! Access mil gaya.", reply_markup=InlineKeyboardMarkup(kb))
-    else:
-        kb = []
-        for c in CHANNELS:
-            kb.append([InlineKeyboardButton(f"📢 Join {c['name']}", url=c["link"])])
-        kb.append([InlineKeyboardButton("✅ Verify Again", callback_data='verify')])
-        await q.edit_message_text("❌ Abhi join baqi hai! Dono join karo.", reply_markup=InlineKeyboardMarkup(kb))
+    for chat_id in CHAT_IDS:   # ✅ send to all chats
+        payload = {
+            "chat_id": chat_id,
+            "text": msg[:3900],   # Telegram limit safe side
+            "parse_mode": "HTML"
+        }
+        if kb:
+            payload["reply_markup"] = kb.to_json()
 
-def scrape_answers():
+        for i in range(3):  # retry 3 times
+            try:
+                r = requests.post(url, data=payload, timeout=10)
+                if r.status_code == 200:
+                    success = True
+                    break
+                else:
+                    print(f"❌ Telegram Error ({chat_id}):", r.text)
+            except Exception as e:
+                print(f"❌ Telegram Exception ({chat_id}):", e)
+            time.sleep(1)
+
+    return success
+
+# ========= QUEUE WORKER =========
+def sender_worker():
+    while True:
+        msg, kb = message_queue.get()
+        send_to_telegram(msg, kb)
+        print("📤 Sent from queue")
+        time.sleep(0.5)  # 0.5 sec gap
+        message_queue.task_done()
+
+
+# ========= HELPERS =========
+def safe_request(url, params):
     try:
-        r = requests.get("https://telenorquiztoday.com.pk/", headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        for table in soup.find_all('table'):
-            if 'Q1' in table.get_text():
-                rows = table.find_all('tr')
-                ans = []
-                for row in rows:
-                    cols = row.find_all(['td','th'])
-                    if len(cols) >= 2:
-                        a = cols[-1].get_text(strip=True)
-                        if 1 < len(a) < 50:
-                            ans.append(a)
-                if len(ans) >= 5:
-                    return "\n".join([f"Q{i} = {a}" for i,a in enumerate(ans[:5],1)])
-    except Exception as e:
-        print(e)
+        response = requests.get(url, params=params, timeout=15)
+        return response.json()
+    except Exception:
+        return None
+
+
+def view_stats(dt1, dt2, records=50, start=0):
+    params = {"token": API_TOKEN, "dt1": dt1, "dt2": dt2, "records": records, "start": start}
+    return safe_request(f"{BASE_URL}/viewstats", params)
+
+
+def extract_otp(message: str) -> str | None:
+    message = unicodedata.normalize("NFKD", message)
+    message = re.sub(r"[\u200f\u200e\u202a-\u202e]", "", message)
+
+    keyword_regex = re.search(r"(otp|code|pin|password)[^\d]{0,10}(\d[\d\-]{3,8})", message, re.I)
+    if keyword_regex:
+        return re.sub(r"\D", "", keyword_regex.group(2))
+
+    reverse_regex = re.search(r"(\d[\d\-]{3,8})[^\w]{0,10}(otp|code|pin|password)", message, re.I)
+    if reverse_regex:
+        return re.sub(r"\D", "", reverse_regex.group(1))
+
+    generic_regex = re.findall(r"\d{2,4}[-]?\d{2,4}", message)
+    if generic_regex:
+        otp = generic_regex[0]
+        return re.sub(r"\D", "", otp)
+
     return None
 
-async def get_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    if not await is_joined_all(context, q.from_user.id):
-        await q.edit_message_text("❌ Pehle channels join karo! /start likho")
-        return
-    await q.edit_message_text("⏳ Answers la raha hun...")
-    res = scrape_answers()
-    if not res:
-        res = "Q1 = 12\nQ2 = 32\nQ3 = Neck\nQ4 = Wrist\nQ5 = Ankle"
-    await q.edit_message_text(f"✅ Aaj Ke Answers:\n\n{res}\n\n📢 @bekarChannel\n📢 @raretriccks")
+def mask_number(number: str) -> str:
+    if len(number) <= 4:
+        return number  # chhota number to mask na karo
+    
+    mid = len(number) // 2
+    # beech ke 2 digits mask karo
+    start = number[:mid-1]
+    end = number[mid+1:]
+    return start + "**" + end
 
-def main():
-    if not BOT_TOKEN:
-        print("ERROR: BOT_TOKEN secret nahi mila!")
-        return
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(verify_join, pattern='verify'))
-    app.add_handler(CallbackQueryHandler(get_quiz, pattern='get_quiz'))
-    print("Bot chal raha hai...")
-    app.run_polling()
 
+
+def country_from_number(number: str) -> tuple[str, str]:
+    try:
+        parsed = phonenumbers.parse("+" + number)
+        region = phonenumbers.region_code_for_number(parsed)
+        if not region:
+            return "Unknown", "🌍"
+        country_obj = pycountry.countries.get(alpha_2=region)
+        if not country_obj:
+            return "Unknown", "🌍"
+        country = country_obj.name
+        flag = "".join([chr(127397 + ord(c)) for c in region])
+        return country, flag
+    except Exception:
+        return "Unknown", "🌍"
+
+
+def format_message(record):
+    current_time = record.get("dt")
+    number = record.get("num") or "Unknown"
+    sender = record.get("cli") or "Unknown"
+    message = record.get("message") or ""
+    payout = record.get("payout", "0")
+
+    country, flag = country_from_number(number)
+    otp = extract_otp(message)
+    otp_line = f"<blockquote>🔑 <b>OTP:</b> <code>{html.escape(otp)}</code></blockquote>\n" if otp else ""
+
+    formatted = (
+        f"{flag} <b>New {sender} OTP Received</b>\n\n"
+        f"<blockquote>🕰 <b>Time:</b> <b>{html.escape(str(current_time))}</b></blockquote>\n"
+        f"<blockquote>🌍 <b>Country:</b> <b>{html.escape(country)} {flag}</b></blockquote>\n"
+        f"<blockquote>📱 <b>Service:</b> <b>{html.escape(sender)}</b></blockquote>\n"
+        f"<blockquote>📞 <b>Number:</b> <b>{html.escape(mask_number(number))}</b></blockquote>\n"
+        f"{otp_line}"
+        f"<blockquote>✉️ <b>Full Message:</b></blockquote>\n"
+        f"<blockquote><code>{html.escape(message)}</code></blockquote>\n\n"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("🚀 Panel", url=f"{CHANNEL_LINK}")],
+        [InlineKeyboardButton("📱Main Channel", url=f"{BACKUP}")]
+    ]
+
+    return formatted, InlineKeyboardMarkup(keyboard)
+
+from telegram.ext import Updater, CommandHandler, CallbackContext
+from telegram import Update
+
+# ===== START COMMAND =====
+def start(update: Update, context: CallbackContext):
+    text = (
+        "🤖 <b>Bot is Active</b>"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("🤖 Number Bot", url="https://t.me/hxotpbot")],
+        [InlineKeyboardButton("📢 Main Channel", url=f"{BACKUP}")]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+
+
+# ===== ADD HANDLER =====
+def start_bot_handlers():
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("start", start))
+
+    updater.start_polling()
+    print("🤖 Start command Activated...")
+    updater.idle()
+
+
+# ========= MAIN FETCHER =========
+def main_loop():
+    print("🚀 OTP Monitor Started...")
+
+    while True:
+        stats = view_stats("1970-01-01 00:00:00", "2099-12-31 23:59:59", records=10) or {}
+
+        if stats.get("status") == "success":
+            for record in stats["data"]:
+                uid = f"{record.get('dt')}_{record.get('num')}_{record.get('message')}"
+                if uid not in seen_messages:
+                    seen_messages.add(uid)
+                    msg, kb = format_message(record)
+                    message_queue.put((msg, kb))   # ✅ queue me bhejna
+                    print("🌀 Queued:", record.get("message"))
+
+        time.sleep(0.2)  # faster fetch
+
+
+# ========= FLASK HEALTH CHECK =========
+app = Flask(__name__)
+
+@app.route("/health")
+def health():
+    return Response("OK", status=200)
+
+
+# ========= START BOTH =========
 if __name__ == "__main__":
-    main()
+    # Start sender worker thread
+    # Start /start bot handler
+    threading.Thread(target=start_bot_handlers, daemon=True).start()
+    threading.Thread(target=sender_worker, daemon=True).start()
+
+    # Start OTP fetcher
+    threading.Thread(target=main_loop, daemon=True).start()
+
+    # Start Flask
+    app.run(host="0.0.0.0", port=8010)
+
