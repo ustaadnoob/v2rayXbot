@@ -16,8 +16,7 @@ from flask import Flask, Response
 # ===== CONFIG =====
 API_TOKEN = "Api token"
 BASE_URL = "http://51.77.216.195/crapi/dgroup"
-
-BOT_TOKEN = "8647027040:AAH6a8mpTBylHbbB6XBbaLvZz72PpETMwwE"
+BOT_TOKEN: ${{ secrets.BOT_TOKEN }}"
 CHAT_IDS = [
     "1087968824"
     ]
